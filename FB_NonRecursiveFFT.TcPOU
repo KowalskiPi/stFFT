@@ -1,0 +1,418 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4024.12">
+  <POU Name="FB_NonRecursiveFFT" Id="{67c97afd-d765-4313-b88c-e4dc8711c6b7}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_NonRecursiveFFT
+VAR
+	N				: UINT;	//Length of currently computed FFT vector
+	w_real			: ARRAY[0..(GVL_Math.iFFTSampleLength-1)] OF REAL; //Twiddle factors' real components
+	w_complex		: ARRAY[0..(GVL_Math.iFFTSampleLength-1)] OF REAL;	//Twiddle factors' imaginary components
+	k				: UINT;	//Loop index
+	ind				: UINT;	//Index of first (even) sum element
+	w_ind			: UINT;	//Twiddle factor index
+	span			: UINT;	//Block index
+	LpN				: UINT;	//Total data length divided by current N. Saved for optimatization reasons.
+	w_r				: REAL;	//Selected twiddle factor real component
+	w_c				: REAL;	//Selected twiddle factor imaginarycomponent
+	A_r				: REAL;	//Even element real component
+	A_c				: REAL;	//Even element imaginary component
+	B_r				: REAL;	//Odd element real component
+	B_c				: REAL;	//Odd element imaginarycomponent
+	DFTX_real		: ARRAY[0..(GVL_Math.iFFTSampleLength-1)] OF REAL;	//Real components of data
+	DFTX_complex	: ARRAY[0..(GVL_Math.iFFTSampleLength-1)] OF REAL;	//Imaginary components of data
+	
+	tmp_real		: ARRAY[0..(GVL_Math.iFFTSampleLength-1)] OF REAL;	//Temporary storage for real components
+	tmp_complex		: ARRAY[0..(GVL_Math.iFFTSampleLength-1)] OF REAL;	//Temporary storage for imaginary components
+	
+	bFFTBusy		: BOOL:= FALSE;
+	L				: UINT;	//Data length
+	bEnable			: BOOL;
+	bRemove0HzBusy	: BOOL;
+END_VAR
+VAR_OUTPUT
+	arFreqMagnitude			: ARRAY[0..(GVL_Math.iFFTSampleLength/2 - 1)] OF REAL;			//Frequency magnitude
+	arFreq					: ARRAY[0..(GVL_Math.iFFTSampleLength/2) - 1] OF REAL;			//Frequency
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[]]></ST>
+    </Implementation>
+    <Property Name="_bFFTBusy" Id="{288a6c8f-8ae1-4054-a81e-d02073e22463}">
+      <Declaration><![CDATA[PROPERTY _bFFTBusy : BOOL]]></Declaration>
+      <Get Name="Get" Id="{5be9d37c-ea5d-44d1-95a0-9936e15c51c0}">
+        <Declaration><![CDATA[VAR
+END_VAR
+]]></Declaration>
+        <Implementation>
+          <ST><![CDATA[_bFFTBusy:= bFFTBusy;]]></ST>
+        </Implementation>
+      </Get>
+    </Property>
+    <Method Name="FFTComplex" Id="{902e08f5-11a7-45dc-aa61-4e03896f61b3}">
+      <Declaration><![CDATA[METHOD FFTComplex : BOOL
+VAR_INPUT
+END_VAR
+VAR
+	tmp_real		: ARRAY[0..255] OF REAL;	//Temporary storage for real components
+	tmp_complex		: ARRAY[0..255] OF REAL;	//Temporary storage for imaginary components
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FFTComplex:= FALSE;
+N := 2;
+while N <= L do
+        //Twidddle factor precalculation
+        IF N > 2 THEN
+			FOR k := 0 TO N/2 - 1 DO
+				w_real[k] := cos(2.0*3.14159265359*uint_to_real(k)/uint_to_real(N));
+				w_complex[k] := sin(2.0*3.14159265359*uint_to_real(k)/uint_to_real(N));
+			END_FOR;			
+		END_IF
+		
+        ind := 0;
+        w_ind := 0;
+        span := 1;
+        LpN := L/N;
+		
+        FOR k := 0 TO L-1 DO        
+            (* Selecting right twiddle factor based on case to ensure phase shift not happen*)
+            IF w_ind <= N/2 THEN
+                IF w_ind <= N/8 THEN
+                    w_r := w_real[ w_ind ];
+                    w_c := -w_complex[ w_ind ];
+                ELSIF w_ind <= N/4 THEN
+                    w_r := w_complex[ N/4-w_ind ];
+                    w_c := -w_real[ N/4-w_ind ];
+                ELSIF w_ind <= 3*N/8 THEN
+                    w_r := -w_complex[ w_ind-N/4 ];
+                    w_c := -w_real[ w_ind-N/4 ];
+                ELSE
+                    w_r := -w_real[ N/2-w_ind ];
+                    w_c := -w_complex[ N/2-w_ind ];
+                END_IF;
+            ELSE
+                IF w_ind <= 5*N/8 THEN
+                    w_r := -w_real[ w_ind-N/2 ];
+                    w_c := w_complex[ w_ind-N/2 ];
+                ELSIF w_ind <= 3*N/4 THEN
+                    w_r := -w_complex[ 3*N/4-w_ind ];
+                    w_c := w_real[ 3*N/4-w_ind ];
+                ELSIF w_ind <= 7*N/8 THEN
+                    w_r := w_complex[ w_ind-3*N/4 ];
+                    w_c := w_real[ w_ind-3*N/4 ];
+                ELSE
+                    w_r := w_real[ N-w_ind ];
+                    w_c := w_complex[ N-w_ind ];
+                END_IF
+            END_IF
+				
+			//Separate data array into 2 part: Even and Odd
+			A_r := tmp_real[ ind ];
+            A_c := tmp_complex[ ind ];
+            B_r := tmp_real[ ind+LpN ];
+            B_c := tmp_complex[ ind+LpN ];
+			
+            (*	DFT matrix calc: A + B*w = (A_r+iA_c)+(B_r+iB_c)(W_r+iW_c)
+				Separation of real and imaginary components
+			*)
+            tmp_real[ k ] := A_r + B_r*w_r - B_c*w_c;
+            tmp_complex[ k ] := A_c + B_r*w_c + B_c*w_r;
+            
+            (* Indexing
+               Index is the index of even element. Odd element is always with index
+               offset of LpN from even element.
+			*)
+            ind := ind + 1;
+            IF ind + LpN = L THEN //Transition from first half to second
+                ind := 0;
+                w_ind := w_ind + 1;
+                span  := 1;
+            ELSIF ind + LpN = span*LpN*2 THEN //Transition between spans
+                ind := ind + LpN;
+                w_ind := w_ind + 1;
+                span := span + 1;
+            end_if;
+		
+        end_for;
+        N := N*2;
+END_WHILE;
+        (* Copy all elements from temp to data vector *)
+        for k := 0 to L-1 do
+            DFTX_real[ k ] := tmp_real[ k ];
+            DFTX_complex[ k ] := tmp_complex[ k ];
+        end_for;
+
+FFTComplex:= TRUE;
+RETURN; ]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FFTFreqMagnitude" Id="{8aae35c3-ea1b-4f16-87c5-ae5fcc4e9f47}">
+      <Declaration><![CDATA[METHOD FFTFreqMagnitude : BOOL
+VAR_INPUT
+	fDeltaT			: REAL;	//Sampling time interval in seconds
+END_VAR
+VAR
+	iIndx			: INT	:= 0;
+	rSum			: REAL	:= 0;
+	rAverage		: REAL;
+	fDeltaFreq		: REAL;
+	fSamplingRate	: REAL;
+	fAliasLowBound	: REAL;	
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FFTFreqMagnitude:= FALSE;
+
+fDeltaFreq:= 1/(255*fDeltaT);
+fSamplingRate:= 1/fDeltaT;
+fAliasLowBound:= fSamplingRate/2;
+
+FOR iIndx:= 0 TO 127 DO
+	arFreqMagnitude[iIndx]:= SQRT(EXPT(DFTX_real[iIndx], 2) + EXPT(DFTX_complex[iIndx], 2));
+	arFreq[iIndx]:= iIndx*fDeltaFreq;
+END_FOR
+
+FFTFreqMagnitude:= TRUE;
+RETURN; ]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FFTRadix2_Mod" Id="{06e30f12-04b3-4833-8fd0-37feaacbc63f}">
+      <Declaration><![CDATA[METHOD FFTRadix2_Mod : BOOL
+VAR_INPUT
+END_VAR
+
+VAR
+	iBitMask: UINT;
+	
+	iHalf: UINT;
+	iAngleIncre: REAL;
+	iBaseIndx: UINT;
+	iK: UINT;
+	iEvenIndx: UINT:= 0;
+	iOddIndx: UINT;
+	fEvenReal: REAL;
+	fEvenImag: REAL;
+	fOddReal: REAL;
+	fOddImag: REAL;
+	fSwapBufferReal: REAL;
+	fSwapBufferImag: REAL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT bEnable AND bFFTBusy THEN
+	FFTRadix2_Mod:= FALSE;
+	RETURN;
+END_IF
+
+
+bFFTBusy:= TRUE;
+iEvenIndx := 0;
+
+FOR iBaseIndx := 1 TO L - 1 DO	
+	iBitMask := L/2;
+	
+	WHILE iEvenIndx >= iBitMask DO
+		iEvenIndx := iEvenIndx - iBitMask;
+		iBitMask := iBitMask / 2;
+	END_WHILE
+
+	iEvenIndx := iEvenIndx + iBitMask;
+	
+	IF iBaseIndx < iEvenIndx THEN
+		//Swapping value
+		fSwapBufferReal := tmp_real[iEvenIndx];
+		tmp_real[iEvenIndx] := tmp_real[iBaseIndx];
+		tmp_real[iBaseIndx] := fSwapBufferReal;
+
+		fSwapBufferImag := tmp_complex[iEvenIndx];
+		tmp_complex[iEvenIndx] := tmp_complex[iBaseIndx];
+		tmp_complex[iBaseIndx] := fSwapBufferImag;
+	END_IF
+END_FOR
+
+//FFT execute
+N := 2;
+//iEvenIndx := 0;
+
+WHILE N <= L DO
+	iHalf:= N/2;
+	iAngleIncre:= 2.0*3.14159265359/UDINT_TO_REAL(N);
+	
+	FOR iBaseIndx := 0 TO L - 2 BY N DO
+		//Caculate for data array in 2 part: Even and Odd
+		FOR iK:= 0 TO iHalf - 1 DO
+			iEvenIndx:= iBaseIndx + iK;
+			iOddIndx:= iEvenIndx + iHalf;	
+			
+			w_real[iK] := COS(iAngleIncre*UINT_TO_REAL(iK));
+			w_complex[iK] := SIN(iAngleIncre*UINT_TO_REAL(iK));
+			
+
+			fEvenReal	:= tmp_real[iEvenIndx];
+			fEvenImag	:= tmp_complex[iEvenIndx];
+			fOddReal	:= COS(iAngleIncre*UINT_TO_REAL(iK))*tmp_real[iOddIndx] - SIN(iAngleIncre*UINT_TO_REAL(iK))*tmp_complex[iOddIndx];
+			fOddImag	:= SIN(iAngleIncre*UINT_TO_REAL(iK))*tmp_real[iOddIndx] + COS(iAngleIncre*UINT_TO_REAL(iK))*tmp_complex[iOddIndx];
+			
+			tmp_real[iEvenIndx]:= fEvenReal + fOddReal;
+			tmp_complex[iEvenIndx]:= fEvenImag + fOddImag;
+			tmp_real[iOddIndx]:= fEvenReal - fOddReal;
+			tmp_complex[iOddIndx]:= fEvenImag - fOddImag;
+			
+		END_FOR
+	END_FOR;			
+	
+	N := N*2;
+END_WHILE;
+
+DFTX_real:= tmp_real;
+DFTX_complex:= tmp_complex;
+
+//Filter out 0Hz
+DFTX_real[0]:= 0;
+DFTX_complex[0]:= 0;
+
+FFTRadix2_Mod:= TRUE;
+bFFTBusy:= FALSE;
+RETURN; ]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="FilterRemove0Hz" Id="{243ebdcc-e43a-466b-b25a-60eebfe1438b}">
+      <Declaration><![CDATA[METHOD FilterRemove0Hz : BOOL
+VAR
+	iIndx			: UINT	:= 0;
+	rSum			: REAL	:= 0;
+	rAverage		: REAL;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF NOT bEnable AND bRemove0HzBusy THEN
+	FilterRemove0Hz:= FALSE;
+	RETURN;
+END_IF
+
+bRemove0HzBusy:= TRUE;
+
+rSum:= 0;
+
+FOR iIndx := 0 TO (GVL_Math.iFFTSampleLength-1) DO
+	rSum:= rSum + tmp_real[iIndx]; 
+END_FOR
+rAverage:= rSum / 256;
+
+FOR iIndx := 0 TO 255 DO
+	tmp_real[iIndx]:= tmp_real[iIndx] - rAverage;
+END_FOR
+
+FilterRemove0Hz:= TRUE;
+RETURN; ]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="GetSample" Id="{215f2820-e7e0-4586-a270-e41665e1b961}">
+      <Declaration><![CDATA[METHOD GetSample : BOOL
+VAR_INPUT
+	iSampleLength: UINT;
+	x_real			: ARRAY[0..(GVL_Math.iFFTSampleLength - 1)] OF REAL;	//Real components of data
+	x_imag		: ARRAY[0..(GVL_Math.iFFTSampleLength - 1)] OF REAL := [0];	//Imaginary components of data
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF bFFTBusy THEN
+	RETURN;
+ELSE
+	bEnable:= FALSE;
+	tmp_real:= x_real;
+	tmp_complex:= x_imag;
+	L:= iSampleLength;
+	bEnable:= TRUE;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <LineIds Name="FB_NonRecursiveFFT">
+      <LineId Id="9" Count="0" />
+    </LineIds>
+    <LineIds Name="FB_NonRecursiveFFT._bFFTBusy.Get">
+      <LineId Id="2" Count="0" />
+    </LineIds>
+    <LineIds Name="FB_NonRecursiveFFT.FFTComplex">
+      <LineId Id="114" Count="0" />
+      <LineId Id="6" Count="3" />
+      <LineId Id="128" Count="2" />
+      <LineId Id="126" Count="1" />
+      <LineId Id="86" Count="0" />
+      <LineId Id="14" Count="3" />
+      <LineId Id="87" Count="0" />
+      <LineId Id="18" Count="0" />
+      <LineId Id="20" Count="0" />
+      <LineId Id="22" Count="28" />
+      <LineId Id="104" Count="0" />
+      <LineId Id="90" Count="0" />
+      <LineId Id="92" Count="2" />
+      <LineId Id="91" Count="0" />
+      <LineId Id="95" Count="0" />
+      <LineId Id="52" Count="0" />
+      <LineId Id="60" Count="0" />
+      <LineId Id="96" Count="0" />
+      <LineId Id="61" Count="5" />
+      <LineId Id="97" Count="0" />
+      <LineId Id="67" Count="12" />
+      <LineId Id="5" Count="0" />
+      <LineId Id="118" Count="3" />
+      <LineId Id="117" Count="0" />
+      <LineId Id="113" Count="0" />
+      <LineId Id="112" Count="0" />
+      <LineId Id="111" Count="0" />
+    </LineIds>
+    <LineIds Name="FB_NonRecursiveFFT.FFTFreqMagnitude">
+      <LineId Id="27" Count="1" />
+      <LineId Id="15" Count="0" />
+      <LineId Id="17" Count="0" />
+      <LineId Id="20" Count="0" />
+      <LineId Id="16" Count="0" />
+      <LineId Id="5" Count="0" />
+      <LineId Id="13" Count="0" />
+      <LineId Id="21" Count="0" />
+      <LineId Id="11" Count="0" />
+      <LineId Id="26" Count="0" />
+      <LineId Id="25" Count="0" />
+      <LineId Id="12" Count="0" />
+    </LineIds>
+    <LineIds Name="FB_NonRecursiveFFT.FFTRadix2_Mod">
+      <LineId Id="395" Count="0" />
+      <LineId Id="471" Count="0" />
+      <LineId Id="393" Count="0" />
+      <LineId Id="470" Count="0" />
+      <LineId Id="468" Count="1" />
+      <LineId Id="536" Count="60" />
+      <LineId Id="604" Count="0" />
+      <LineId Id="603" Count="0" />
+      <LineId Id="602" Count="0" />
+      <LineId Id="597" Count="0" />
+      <LineId Id="601" Count="0" />
+      <LineId Id="598" Count="1" />
+      <LineId Id="111" Count="0" />
+    </LineIds>
+    <LineIds Name="FB_NonRecursiveFFT.FilterRemove0Hz">
+      <LineId Id="33" Count="3" />
+      <LineId Id="38" Count="0" />
+      <LineId Id="25" Count="0" />
+      <LineId Id="17" Count="0" />
+      <LineId Id="19" Count="0" />
+      <LineId Id="39" Count="0" />
+      <LineId Id="14" Count="1" />
+      <LineId Id="10" Count="0" />
+      <LineId Id="16" Count="0" />
+      <LineId Id="13" Count="0" />
+      <LineId Id="5" Count="0" />
+      <LineId Id="8" Count="1" />
+      <LineId Id="24" Count="0" />
+      <LineId Id="23" Count="0" />
+      <LineId Id="22" Count="0" />
+    </LineIds>
+    <LineIds Name="FB_NonRecursiveFFT.GetSample">
+      <LineId Id="5" Count="0" />
+      <LineId Id="8" Count="0" />
+      <LineId Id="6" Count="0" />
+      <LineId Id="19" Count="0" />
+      <LineId Id="9" Count="1" />
+      <LineId Id="14" Count="0" />
+      <LineId Id="20" Count="0" />
+      <LineId Id="7" Count="0" />
+    </LineIds>
+  </POU>
+</TcPlcObject>
