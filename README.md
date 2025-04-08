@@ -1,2 +1,2 @@
 # stFFT
-An implementation of FFT on Structured Text, modify to adapt with TwinCAT.
+An implementation of naive Fast Fourier Transform on Structured Text, modify to adapt with TwinCAT.
