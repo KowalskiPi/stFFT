@@ -1,0 +1,12 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4024.12">
+  <GVL Name="GVL_Math" Id="{84eed701-d7ff-467c-bffb-4cb74710d55e}">
+    <Declaration><![CDATA[{attribute 'qualified_only'}
+VAR_GLOBAL
+END_VAR
+VAR_GLOBAL CONSTANT
+	iFFTSampleLength	: UINT := 256;
+END_VAR
+]]></Declaration>
+  </GVL>
+</TcPlcObject>
